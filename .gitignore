@@ -1,0 +1,35 @@
+# Çalıştırılabilir Derleme Dosyaları (Binaries)
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+go-chatter
+
+# Test Çıktıları ve Profiling
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go Workspace Dosyaları
+go.work
+go.work.sum
+
+# Ortam Değişkenleri ve Gizli Dosyalar (Çok Önemli)
+.env
+.env.*
+*.env
+secret.json
+
+# IDE ve Editör Ayarları (Görselde VSCode kullandığın için özellikle .vscode eklendi)
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# İşletim Sistemi Geçici Dosyaları
+.DS_Store
+Thumbs.db
