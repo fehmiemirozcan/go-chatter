@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	inChan  = make(chan string)
-	outChan = make(chan string)
+	inChan      = make(chan string)
+	outChan     = make(chan string)
+	deathSignal = make(chan struct{})
 )
 
 func main() {
@@ -28,7 +29,7 @@ func main() {
 	fmt.Println("Network is being scanned, searching for a Leader...")
 	// Lider arayışı kapsamında ağ taranıyor.
 
-	leaderIP, discoveryErr := discovery.DiscoverLeaderIP()
+	leaderIP, discoveryErr := discovery.DiscoverLeaderIP("8081")
 	if discoveryErr != nil {
 		fmt.Println("No leader found. YOU are the Leader!")
 		// Lider bulunamadı. Lider SİZSİNİZ!
@@ -57,7 +58,7 @@ func getUserName() string {
 
 func startAsLeader(userName string) {
 	// Bulunabilir olsun diye dinleyiciyi açtık.
-	go discovery.StartUDPListener()
+	go discovery.StartUDPListener("8081")
 
 	// Sunucuyu ayağa kaldırıyoruz.
 	hub := server.NewRouterHub()
@@ -78,7 +79,7 @@ func startAsLeader(userName string) {
 	buf := make([]byte, 1024)
 	n, _ := conn.Read(buf)
 	if string(buf[:n]) == "Successful" {
-		go client.StartChat(userName, conn, inChan, outChan)
+		go client.StartChat(userName, conn, inChan, outChan, deathSignal)
 		tui.StartUI(inChan, outChan, userName)
 	} else {
 		fmt.Println("Server Error:", string(buf[:n]))
@@ -103,7 +104,7 @@ func startAsFollower(userName, leaderIP string) {
 	buf := make([]byte, 1024)
 	n, _ := conn.Read(buf)
 	if string(buf[:n]) == "Successful" {
-		go client.StartChat(userName, conn, inChan, outChan)
+		go client.StartChat(userName, conn, inChan, outChan, deathSignal)
 		tui.StartUI(inChan, outChan, userName)
 	} else {
 		fmt.Println("\n[!] Connection rejected:", string(buf[:n]))

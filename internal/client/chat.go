@@ -12,11 +12,22 @@ import (
 	"github.com/Racemir/go-chatter/internal/server"
 )
 
+var (
+	ReconnectDelay     = 50 * time.Second
+	DiscoverLeaderFunc = discovery.DiscoverLeaderIP
+	StartUDPFunc       = discovery.StartUDPListener
+	DialFunc           = net.Dial
+	StartServerFunc    = func() {
+		hub := server.NewRouterHub()
+		go hub.StartServer(":9000")
+	}
+)
+
 type ChatState struct {
 	conn net.Conn
 }
 
-func StartChat(userName string, globalConn net.Conn, inputChan chan string, outputChan chan string) error {
+func StartChat(userName string, globalConn net.Conn, inputChan chan string, outputChan chan string, deathSignal chan struct{}) error {
 
 	cmdHandler := &command.Handler{
 		UserName:      userName,
@@ -27,15 +38,10 @@ func StartChat(userName string, globalConn net.Conn, inputChan chan string, outp
 
 	cmdHandler.RoomPasswords["global"] = ""
 
-	commanddictionary := cmdHandler.GetCommands()
-
-	// BroadcastRooms komutu command.go'dan silindiği için buradaki çağrıyı kaldırdık.
-
 	outputChan <- "Welcome to the secret chat"
 	cmdHandler.CommandHelp(outputChan)
 
 	//kalavyeden gelen msj ilet
-	deathSignal := make(chan struct{})
 
 	var listenToServer func(roomName string, c net.Conn)
 	listenToServer = func(roomName string, c net.Conn) {
@@ -43,7 +49,7 @@ func StartChat(userName string, globalConn net.Conn, inputChan chan string, outp
 		for {
 			n, readErr := c.Read(readBuf) // Sunucudan mesaj var mı ?
 			if readErr != nil {
-				time.Sleep(50 * time.Second)
+				time.Sleep(ReconnectDelay)
 				if cmdHandler.CurrentRoom != roomName {
 					return
 				} else {
@@ -52,21 +58,20 @@ func StartChat(userName string, globalConn net.Conn, inputChan chan string, outp
 					// oda benim isteğim dışında bağlantısını kopardu hala aynı odadayım
 
 					// Ağda yeni bir lider var mı?
-					newLeaderIP, leaderErr := discovery.DiscoverLeaderIP()
+					newLeaderIP, leaderErr := DiscoverLeaderFunc("8081")
 
 					// Lider Yoksa
 					if leaderErr != nil {
 						outputChan <- "[!] You are the leader! Starting server..."
 
 						// UDP dinleyicisini ve ana sunucumuzu ayağa kaldırıyoruz
-						go discovery.StartUDPListener()
-						hub := server.NewRouterHub()
-						go hub.StartServer(":9000")
+						go StartUDPFunc("8081")
+						go StartServerFunc()
 
 						time.Sleep(100 * time.Millisecond)
 
 						// TCP ile bağlanıyoruz
-						newConn, _ := net.Dial("tcp", "localhost:9000")
+						newConn, _ := DialFunc("tcp", "localhost:9000")
 
 						msgs := fmt.Sprintf("createroom|%s||%s", roomName, cmdHandler.UserName)
 						newConn.Write([]byte(msgs))
@@ -85,7 +90,7 @@ func StartChat(userName string, globalConn net.Conn, inputChan chan string, outp
 						outputChan <- msg
 
 						localhost := fmt.Sprintf("%s:9000", newLeaderIP)
-						newConn, _ := net.Dial("tcp", localhost)
+						newConn, _ := DialFunc("tcp", localhost)
 
 						msgs := fmt.Sprintf("join|%s||%s", roomName, cmdHandler.UserName)
 						newConn.Write([]byte(msgs))
@@ -111,77 +116,14 @@ func StartChat(userName string, globalConn net.Conn, inputChan chan string, outp
 			message := strings.Split(rawMsg, "\n")
 
 			for _, msg := range message {
-				msg = strings.TrimSpace(msg)
-
-				if msg == "" {
-					continue
-				}
-
-				// Oda Değişikliği Başarılı
-				if strings.HasPrefix(msg, "ROOMCHANGE|SUCCESS|") {
-					newRoom := strings.TrimPrefix(msg, "ROOMCHANGE|SUCCESS|")
-					cmdHandler.CurrentRoom = newRoom
-					outputChan <- fmt.Sprintf("[SYSTEM] Successfully moved to room '%s'!\n", newRoom)
-					continue
-				}
-
-				// Oda Değişikliği Hatalı
-				if strings.HasPrefix(msg, "ROOMCHANGE|ERR|") {
-					errMsg := strings.TrimPrefix(msg, "ROOMCHANGE|ERR|")
-					outputChan <- fmt.Sprintf("[ERROR] Room action failed: %s\n", errMsg)
-					continue
-				}
-
-				// Oda Listesi
-				if strings.HasPrefix(msg, "ALLROOMS|") {
-					roomList := strings.TrimPrefix(msg, "ALLROOMS|")
-					formatTui := fmt.Sprintf("ROOMS|%s|%s", roomList, cmdHandler.CurrentRoom)
-					outputChan <- formatTui
-					continue
-				}
-
-				// Kullanıcı Listesi
-				if strings.HasPrefix(msg, "ROOMUSERS|") {
-					userList := strings.TrimPrefix(msg, "ROOMUSERS|")
-					formatTui := fmt.Sprintf("USERS|%s", userList)
-					outputChan <- formatTui
-					continue
-				}
-
-				if strings.HasPrefix(msg, "WHISPER|") {
-					// "WHISPER|%s|%s\n
-					args := strings.SplitN(msg, "|", 3)
-					if len(args) == 3 {
-						senderUser := args[1]
-						message := args[2]
-						formatTui := fmt.Sprintf("WHISPER|%s|%s", senderUser, message)
-						outputChan <- formatTui
-					}
-					continue
-				}
 
 				// Normal mesajlar (Artık odaya göre kısıtlamıyoruz, tek bağlantı var)
-				incomingStr := msg
-				parts := strings.SplitN(incomingStr, ": ", 2)
+				parseIncomingMessage(msg, cmdHandler, outputChan)
 
-				if len(parts) == 2 {
-					senderName := parts[0]
-					encryptedMsg := strings.TrimSpace(parts[1]) // Şifrelenmiş msg
-
-					currentPass := cmdHandler.RoomPasswords[cmdHandler.CurrentRoom] // Şifre
-					decryptedMsg := security.DecryptMessage(encryptedMsg, currentPass)
-
-					formatMsg := fmt.Sprintf("MSG| %s: %s\n", senderName, decryptedMsg)
-					outputChan <- formatMsg
-				} else {
-					outputChan <- strings.TrimSpace(incomingStr)
-					// İçinde : yoksa sistem msg
-				}
 			}
-
 		}
+		// Global oda her zaman ilk dinlenecek.
 	}
-	// Global oda her zaman ilk dinlenecek.
 	go listenToServer("global", globalConn)
 	var lastClientMsgTime time.Time
 
@@ -204,62 +146,16 @@ func StartChat(userName string, globalConn net.Conn, inputChan chan string, outp
 
 			if strings.HasPrefix(rawInput, "/") {
 				// Gelen texti komut ve msg olarak 2'ye ayır.
-				words := cleanInput(rawInput)
-
-				commandName := words[0]
-				args := []string{}
-				if len(words) > 1 {
-					args = words[1:]
-				}
-
-				// GetCommand fonksiyonu çağır.
-				cmd, ok := commanddictionary[commandName]
-				if ok {
-					// Eğer komut /quit ise
-					if commandName == "/quit" {
-						if cmdHandler.ServerConn != nil {
-							cmdHandler.ServerConn.Close() // Fişi çek!
-						}
-					}
-					cmd.Callback(outputChan, args...)
-
-				} else {
-					outputChan <- "Unknown command. Type /help"
-				}
+				handleUserCommand(rawInput, cmdHandler, outputChan)
 
 			} else {
-				// Normal Mesaj Gönderme Bloğu
-				now := time.Since(lastClientMsgTime)
-				if now < 300*time.Millisecond {
-					// Ağa hiç göndermeden direkt kendi ekranına uyarı bas ve işlemi kes!
-					outputChan <- "SYSTEM| You're sending messages too quickly!"
-					continue
-				}
-				lastClientMsgTime = time.Now()
-
-				if cmdHandler.ServerConn == nil {
-					outputChan <- "Error: You are not connected to the server."
-					continue
-				}
-
-				currentPass := cmdHandler.RoomPasswords[cmdHandler.CurrentRoom] // Mevcut şifre
-				encryptedText := security.EncryptMessage(rawInput, currentPass) // kilitle
-
-				msg := encryptedText + "\n"
-				_, writeErr := cmdHandler.ServerConn.Write([]byte(msg))
-				if writeErr != nil {
-					outputChan <- "Message could not be sent !!"
-					// Mesaj gönderilemedi!!
-				} else {
-					myMsg := fmt.Sprintf("ME| %s", rawInput)
-					outputChan <- myMsg
-				}
+				sendNormalMessage(rawInput, cmdHandler, outputChan, &lastClientMsgTime)
 			}
 		}
 	}
 }
 
-// cleanInput fonksiyonu.
+// CleanInput fonksiyonu.
 func cleanInput(dirtWords string) []string {
 	output := strings.ToLower(dirtWords)
 
@@ -268,4 +164,134 @@ func cleanInput(dirtWords string) []string {
 	words := strings.Fields(output)
 
 	return words
+}
+
+// Sunucudan gelen ham mesajı analiz eder ve ilgili kanala yönlendirir.
+func parseIncomingMessage(msg string, cmdHandler *command.Handler, outputChan chan string) {
+	msg = strings.TrimSpace(msg)
+
+	if msg == "" {
+		return
+	}
+
+	// Oda Değişikliği Başarılı
+	if strings.HasPrefix(msg, "ROOMCHANGE|SUCCESS|") {
+		newRoom := strings.TrimPrefix(msg, "ROOMCHANGE|SUCCESS|")
+		cmdHandler.CurrentRoom = newRoom
+		outputChan <- fmt.Sprintf("[SYSTEM] Successfully moved to room '%s'!\n", newRoom)
+		return
+	}
+
+	// Oda Değişikliği Hatalı
+	if strings.HasPrefix(msg, "ROOMCHANGE|ERR|") {
+		errMsg := strings.TrimPrefix(msg, "ROOMCHANGE|ERR|")
+		outputChan <- fmt.Sprintf("[ERROR] Room action failed: %s\n", errMsg)
+		return
+	}
+
+	// Oda Listesi
+	if strings.HasPrefix(msg, "ALLROOMS|") {
+		roomList := strings.TrimPrefix(msg, "ALLROOMS|")
+		formatTui := fmt.Sprintf("ROOMS|%s|%s", roomList, cmdHandler.CurrentRoom)
+		outputChan <- formatTui
+		return
+	}
+
+	// Kullanıcı Listesi
+	if strings.HasPrefix(msg, "ROOMUSERS|") {
+		userList := strings.TrimPrefix(msg, "ROOMUSERS|")
+		formatTui := fmt.Sprintf("USERS|%s", userList)
+		outputChan <- formatTui
+		return
+	}
+
+	if strings.HasPrefix(msg, "WHISPER|") {
+		// "WHISPER|%s|%s\n
+		args := strings.SplitN(msg, "|", 3)
+		if len(args) == 3 {
+			senderUser := args[1]
+			message := args[2]
+			formatTui := fmt.Sprintf("WHISPER|%s|%s", senderUser, message)
+			outputChan <- formatTui
+		}
+		return
+	}
+
+	parts := strings.SplitN(msg, ": ", 2)
+
+	if len(parts) == 2 {
+		senderName := parts[0]
+		encryptedMsg := strings.TrimSpace(parts[1]) // Şifrelenmiş msg
+
+		currentPass := cmdHandler.RoomPasswords[cmdHandler.CurrentRoom] // Şifre
+		decryptedMsg := security.DecryptMessage(encryptedMsg, currentPass)
+
+		formatMsg := fmt.Sprintf("MSG| %s: %s\n", senderName, decryptedMsg)
+		outputChan <- formatMsg
+	} else {
+		// İçinde : yoksa sistem msg
+		outputChan <- strings.TrimSpace(msg)
+	}
+}
+
+// Klavyeden "/" ile başlayan girdileri analiz edip çalıştırır.
+func handleUserCommand(rawInput string, cmdHandler *command.Handler, outputChan chan string) {
+	// Gelen texti komut ve argümanlar olarak 2'ye ayır
+	words := cleanInput(rawInput)
+	if len(words) == 0 {
+		return
+	}
+
+	commandName := words[0]
+	args := []string{}
+	if len(words) > 1 {
+		args = words[1:]
+	}
+	// Komut sözlüğünü çek ve komutu ara
+	commanddictionary := cmdHandler.GetCommands()
+	cmd, ok := commanddictionary[commandName]
+	if ok {
+		// Eğer komut /quit ise
+		if commandName == "/quit" {
+			if cmdHandler.ServerConn != nil {
+				cmdHandler.ServerConn.Close() // Fişi çek!
+			}
+		}
+		cmd.Callback(outputChan, args...)
+	} else {
+		outputChan <- "Unknown command. Type /help"
+	}
+}
+
+// Kullanıcının yazdığı normal metinleri şifreler, spam kontrolünden geçirir ve sunucuya gönderir.
+func sendNormalMessage(rawInput string, cmdHandler *command.Handler, outputChan chan string, lastMsgTime *time.Time) {
+	// Spam (Rate Limit) Kontrolü
+	now := time.Since(*lastMsgTime)
+	if now < 300*time.Millisecond {
+		// Ağa hiç göndermeden direkt kendi ekranına uyarı bas ve işlemi kes!
+		outputChan <- "SYSTEM| You're sending messages too quickly!"
+		return
+	}
+	*lastMsgTime = time.Now() // Orijinal zamanlayıcıyı güncelliyoruz
+	// Bağlantı Kontrolü
+	if cmdHandler.ServerConn == nil {
+		outputChan <- "Error: You are not connected to the server."
+		return
+
+	}
+	// Şifreleme İşlemleri
+	currentPass := cmdHandler.RoomPasswords[cmdHandler.CurrentRoom] // Mevcut şifre
+	encryptedText := security.EncryptMessage(rawInput, currentPass) // kilitle
+
+	msg := encryptedText + "\n"
+
+	// Ağa Yazma İşlemi
+	_, writeErr := cmdHandler.ServerConn.Write([]byte(msg))
+	if writeErr != nil {
+		outputChan <- "Message could not be sent !!"
+		// Mesaj gönderilemedi!!
+	} else {
+		myMsg := fmt.Sprintf("ME| %s", rawInput)
+		outputChan <- myMsg
+	}
 }

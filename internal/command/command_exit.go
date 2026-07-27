@@ -2,7 +2,7 @@ package command
 
 import "time"
 
-func (h *Handler) CommandQuit(outputChan chan string, args ...string) error {
+func (h *Handler) CommandExit(outputChan chan string, args ...string) error {
 
 	outputChan <- "Closing the Chatter... Goodbye!"
 

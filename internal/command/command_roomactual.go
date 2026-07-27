@@ -33,6 +33,11 @@ func (h *Handler) sendRoomAction(outputChan chan string, action string, args ...
 	// Mevcut ServerConn üzerinden komut yolluyoruz
 	msg := fmt.Sprintf("CMD|%s|%s|%s\n", action, roomName, password)
 
+	if h.ServerConn == nil {
+		outputChan <- "Error: You are not connected to any server to action!"
+		return fmt.Errorf("no active connection")
+	}
+
 	_, err := h.ServerConn.Write([]byte(msg))
 	if err != nil {
 		outputChan <- "Error: Could not send command to server."

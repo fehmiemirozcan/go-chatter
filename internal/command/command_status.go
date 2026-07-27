@@ -6,6 +6,7 @@ import (
 )
 
 func (h *Handler) CommandStatus(outputChan chan string, args ...string) error {
+
 	if len(args) == 0 {
 		outputChan <- "SYSTEM| Please specify a status. Usage: /status <online|away|dnd>"
 		return nil
@@ -30,6 +31,5 @@ func (h *Handler) CommandStatus(outputChan chan string, args ...string) error {
 	} else {
 		outputChan <- "SYSTEM| Error: You are not connected to the server."
 	}
-
 	return nil
 }

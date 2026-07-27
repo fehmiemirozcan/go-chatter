@@ -23,7 +23,7 @@ func initialModel(in, out chan string, userName string) model {
 	ti.Placeholder = "Secret chat..."
 	ti.ShowSuggestions = true
 	ti.CharLimit = 280
-	ti.SetSuggestions([]string{"/help", "/createroom", "/join", "/whisper", "/quit"})
+	ti.SetSuggestions([]string{"/help", "/createroom", "/join", "/whisper", "/status", "/quit"})
 	ti.Focus()
 
 	m := model{

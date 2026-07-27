@@ -27,29 +27,29 @@ func (h *Handler) GetCommands() map[string]ClientCommand {
 			Callback:    h.CommandHelp,
 		},
 		"/createroom": {
-			name:        "createroom <room_name> <room_password> ",
-			description: " Create a room",
+			name:        "createroom",
+			description: "<room_name> <room_password> ",
 			Callback:    h.CommandCreateRoom,
 		},
 		"/join": {
-			name:        "join <room_name> <room_password>",
-			description: "Join the room",
+			name:        "join",
+			description: "<room_name> <room_password>",
 			Callback:    h.CommandJoinRoom,
 		},
 		"/whisper": {
-			name:        "whisper <user_name> : <message>",
-			description: "slient messge",
+			name:        "whisper",
+			description: "<user_name> : <message>",
 			Callback:    h.CommandWhisper,
 		},
 		"/status": {
-			name:        "status <online|away|dnd>",
-			description: "Change your presence status",
+			name:        "status",
+			description: "<online|away|dnd>",
 			Callback:    h.CommandStatus,
 		},
 		"/quit": {
 			name:        "quit",
 			description: "Exiting the chat",
-			Callback:    h.CommandQuit,
+			Callback:    h.CommandExit,
 		},
 	}
 }

@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-func DiscoverLeaderIP() (string, error) {
+func DiscoverLeaderIP(port string) (string, error) {
 
 	// Tüm cihazlara kısmı
-	broadcastAddr, resolUDPAddrErr := net.ResolveUDPAddr("udp", "255.255.255.255:8081")
+	broadcastAddr, resolUDPAddrErr := net.ResolveUDPAddr("udp", "127.0.0.1:"+port)
 	if resolUDPAddrErr != nil {
 		return "", resolUDPAddrErr
 	}
@@ -43,9 +43,9 @@ func DiscoverLeaderIP() (string, error) {
 	// Bilinmeyen_yanit
 }
 
-func StartUDPListener() {
+func StartUDPListener(port string) {
 
-	addr, _ := net.ResolveUDPAddr("udp", ":8081")
+	addr, _ := net.ResolveUDPAddr("udp", ":"+port)
 	conn, listenUDPErr := net.ListenUDP("udp", addr)
 	if listenUDPErr != nil {
 		return
