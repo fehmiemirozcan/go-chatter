@@ -69,6 +69,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, ListenMessage(m.outChan, m.userName))
 
 	case CustomMsg:
+		if msg.OutsideChat.IsSys && strings.HasPrefix(msg.OutsideChat.Content, "[SYSTEM] Successfully moved to room") {
+			m.message = nil // Eski odanın mesajlarını sil
+		}
 		m.message = append(m.message, msg.OutsideChat)
 		m = m.syncViewports()
 		m.vp.GotoBottom()
@@ -308,7 +311,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				if targetUser != "" {
 					m.userList.ResetFilter()
-					m.ti.SetValue("/whisper " + targetUser + " ")
+					m.ti.SetValue("/whisper " + targetUser + " :" + " ")
 					m.ti.Focus()
 					m.focusBox = FocusInput
 				}

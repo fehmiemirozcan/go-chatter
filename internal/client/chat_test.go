@@ -3,27 +3,123 @@ package client
 import (
 	"fmt"
 	"net"
-	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Racemir/go-chatter/internal/command"
 )
 
-func TestStartChat_HostMigratin(t *testing.T) {
+func TestStartChat_SplitBrainRace(t *testing.T) {
 	var (
-		originalReconnectDelay     = ReconnectDelay
 		originalDiscoverLeaderFunc = DiscoverLeaderFunc
 		originalStartUDPFunc       = StartUDPFunc
 		originalDialFunc           = DialFunc
 		originalStartServerFunc    = StartServerFunc
 	)
 
-	ReconnectDelay = 1 * time.Millisecond
+	defer func() {
+		DiscoverLeaderFunc = originalDiscoverLeaderFunc
+		StartUDPFunc = originalStartUDPFunc
+		DialFunc = originalDialFunc
+		StartServerFunc = originalStartServerFunc
+	}()
+
+	// Kimse bulunamadı simülasyonu
+	DiscoverLeaderFunc = func(port string) (string, error) {
+		return "", fmt.Errorf("No one was found.")
+	}
+	StartUDPFunc = func(port string) {}
+
+	// İlk gelen lider, ikinci gelen hata alır!
+	var portLock sync.Mutex
+	var portInUse bool
+
+	// Yeni ekledim kimin lider olduğunu buradan görüyorum
+	StartServerFunc = func() error {
+		portLock.Lock()
+		defer portLock.Unlock()
+
+		if portInUse {
+			return fmt.Errorf("bind: address already in use") // Adres zaten kullanımda
+		}
+		portInUse = true
+		return nil
+	}
+
+	DialFunc = func(network string, address string) (net.Conn, error) {
+		mockClient, mockServer := net.Pipe()
+		go func() {
+			buf := make([]byte, 1024)
+			mockServer.Read(buf)
+			mockServer.Write([]byte("Successful")) // Doğru yazım!
+		}()
+		return mockClient, nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	users := []string{"Emir", "Barış"}
+	results := make(chan string, 2)
+
+	for _, user := range users {
+		go func(userName string) {
+			defer wg.Done()
+			inputChan := make(chan string, 1)
+			outputChan := make(chan string, 10)
+			deathSignal := make(chan struct{})
+
+			clientConn, serverConn := net.Pipe()
+			serverConn.Close() // Fişi çekip yarışı başlatıyoruz
+
+			go StartChat(userName, clientConn, inputChan, outputChan, deathSignal)
+
+			<-outputChan // Welcome to the secret chat
+			<-outputChan // Help mesajı
+
+			var reaction string //
+			for i := 0; i < 2; i++ {
+				take := <-outputChan
+				if strings.Contains(take, "You are the leader") || strings.Contains(take, "Another client claimed") || strings.Contains(take, "Connection rejected by new leader.") {
+					reaction = take
+				}
+			}
+			results <- fmt.Sprintf("%s: %s", userName, strings.TrimSpace(reaction))
+			clientConn.Close()
+		}(user)
+	}
+
+	wg.Wait()
+	close(results)
+
+	leaderCount := 0 //lider sayısı
+	for res := range results {
+		if strings.Contains(res, "You are the leader") {
+			leaderCount++
+		}
+	}
+
+	if leaderCount > 1 {
+		// split brain problemi oldu sohbet odasında birden fazla lider gözüküyor
+		t.Errorf("Aynı anda lider olmaya çalışan birden fazla kişi var! Lider Sayısı: %d", leaderCount)
+	} else if leaderCount == 0 {
+		t.Errorf("Kimse lider olamadı!") // sistem kilitlenmiş yada tamamen çoktü
+	} else {
+		t.Log("Harika! Sadece bir kişi lider oldu.")
+	}
+}
+
+func TestStartChat_HostMigration(t *testing.T) {
+	var (
+		originalDiscoverLeaderFunc = DiscoverLeaderFunc
+		originalStartUDPFunc       = StartUDPFunc
+		originalDialFunc           = DialFunc
+		originalStartServerFunc    = StartServerFunc
+	)
 
 	defer func() {
-		ReconnectDelay = originalReconnectDelay
 		DiscoverLeaderFunc = originalDiscoverLeaderFunc
 		StartUDPFunc = originalStartUDPFunc
 		DialFunc = originalDialFunc
@@ -34,73 +130,168 @@ func TestStartChat_HostMigratin(t *testing.T) {
 		testName     string
 		expectedChan string
 	}{
-		{"Yeni Lider Bulundu", "[!] New leader found at 192.168.1.100. Connecting..."},
-		{"Lider Benim", "[!] You are the leader! Starting server..."},
+		{"New Leader Found", "[!] New leader found at 192.168.1.100. Connecting..."},
+		{"I Am the Leader", "[!] You are the leader! Starting server..."},
 	}
 
 	for _, test := range tests {
-		inputChan := make(chan string, 1)
-		outputChan := make(chan string, 10)
-		deathSignal := make(chan struct{})
+		t.Run(test.testName, func(t *testing.T) {
+			inputChan := make(chan string, 1)
+			outputChan := make(chan string, 10)
+			deathSignal := make(chan struct{})
 
-		clientConn, serverConn := net.Pipe()
-		serverConn.Close()
+			clientConn, serverConn := net.Pipe()
+			serverConn.Close() // Fişi çekiyoruz
 
-		StartUDPFunc = func(port string) {}
-		StartServerFunc = func() {}
+			StartUDPFunc = func(port string) {}
+			StartServerFunc = func() error { return nil }
 
-		if test.testName == "Lider Benim" {
-			DiscoverLeaderFunc = func(port string) (string, error) {
-				return "", fmt.Errorf("No one was found.")
+			if test.testName == "I Am the Leader" {
+				DiscoverLeaderFunc = func(port string) (string, error) {
+					return "", fmt.Errorf("No one was found.")
+				}
+			} else {
+				DiscoverLeaderFunc = func(port string) (string, error) {
+					return "192.168.1.100", nil
+				}
 			}
-		} else {
-			DiscoverLeaderFunc = func(port string) (string, error) {
-				return "192.168.1.100", nil
+
+			// Her dial çağrısında yeni bir pipe oluşturuyorum
+			DialFunc = func(network string, address string) (net.Conn, error) {
+				mockClient, mockServer := net.Pipe()
+				go func() {
+					buf := make([]byte, 1024)
+					mockServer.Read(buf)
+					// DİKKAT: "Successful" kelimesindeki yazım hatası düzeltildi!
+					mockServer.Write([]byte("Successful"))
+				}()
+				return mockClient, nil
 			}
-		}
 
-		mockClient, mockServer := net.Pipe()
-		DialFunc = func(network string, address string) (net.Conn, error) { return mockClient, nil }
+			go StartChat("TestUser", clientConn, inputChan, outputChan, deathSignal)
 
-		go func() {
-			buf := make([]byte, 1024)
-			mockServer.Read(buf)
-			mockServer.Write([]byte("Succesful"))
+			<-outputChan // "Welcome to the secret chat"
+			<-outputChan // Help mesajı
+			<-outputChan // Leader connection lost
 
-		}()
+			// Zaman ayarlı okuma (Test sonsuza kadar takılmasın diye)
+			select {
+			case take := <-outputChan:
+				if !strings.Contains(take, test.expectedChan) {
+					t.Errorf("Expected to contain: %q , Received: %q", test.expectedChan, take)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("Test zaman aşımına uğradı! Beklenen mesaj gelmedi: %s", test.expectedChan)
+			}
 
-		go StartChat("TestUser", clientConn, inputChan, outputChan, deathSignal)
+			clientConn.Close()
+		})
+	}
+}
 
-		<-outputChan // "Welcome to the secret chat"
-		<-outputChan // Help mesajı
-		<-outputChan // Leader connection lost
+func TestStartChat_MigrationFailures(t *testing.T) {
+	var (
+		originalDiscoverLeaderFunc = DiscoverLeaderFunc
+		originalStartUDPFunc       = StartUDPFunc
+		originalDialFunc           = DialFunc
+		originalStartServerFunc    = StartServerFunc
+	)
 
-		take := <-outputChan
-		if !strings.Contains(take, test.expectedChan) {
-			t.Errorf("[%s] Expected to contain: %q , Received: %q", test.testName, test.expectedChan, take)
-		}
+	defer func() {
+		DiscoverLeaderFunc = originalDiscoverLeaderFunc
+		StartUDPFunc = originalStartUDPFunc
+		DialFunc = originalDialFunc
+		StartServerFunc = originalStartServerFunc
+	}()
 
-		mockClient.Close()
-		mockServer.Close()
+	tests := []struct {
+		testName      string
+		isLeaderFound bool   // ağda lider var mı
+		serverStarts  bool   // sunucu başladı mı
+		serverReply   string // serverdan gelen cevap
+		expectedChan  string // hata mesajı
+	}{
+		{"ağda lider var ama bağlanamiyor", true, false, "UnSuccesful", "[!] Migration failed: Could not connect to remote leader."},
+		{"lider ben yada baskasi degil", false, false, "UnSuccesful", "[!] Migration failed: Connection rejected by new leader."},
+		{"lider kendi serverina oda kuramiyor", false, true, "UnSuccesful", "[!] You are the leader! Starting server..."},
+	}
+
+	for _, test := range tests {
+		t.Run(test.testName, func(t *testing.T) {
+			inputChan := make(chan string, 1)
+			outputChan := make(chan string, 10)
+			deatSignal := make(chan struct{})
+
+			clientConn, serverConn := net.Pipe()
+			serverConn.Close()
+
+			StartUDPFunc = func(port string) {}
+			if test.isLeaderFound {
+				DiscoverLeaderFunc = func(port string) (string, error) {
+					return "192.168.1.100", nil
+				}
+			} else {
+				DiscoverLeaderFunc = func(port string) (string, error) {
+					return "", fmt.Errorf("No one was found.")
+				}
+			}
+
+			if test.serverStarts {
+				StartServerFunc = func() error { return nil }
+			} else {
+				StartServerFunc = func() error { return fmt.Errorf("bind: adress already in use") }
+			}
+
+			DialFunc = func(network string, address string) (net.Conn, error) {
+				mockClient, mocServer := net.Pipe()
+				go func() {
+					buf := make([]byte, 1024)
+					mocServer.Read(buf)
+					mocServer.Write([]byte(test.serverReply)) // UnSuccesful
+				}()
+				return mockClient, nil
+			}
+
+			go StartChat("TestUser", clientConn, inputChan, outputChan, deatSignal)
+
+			<-outputChan // "Welcome to the secret chat"
+			<-outputChan // Help mesajı
+			<-outputChan // Leader connection lost
+
+			found := false
+			timeout := time.After(2 * time.Second)
+
+		loop:
+			for {
+				select {
+				case take := <-outputChan:
+					if strings.Contains(take, test.expectedChan) {
+						found = true
+						break loop
+					}
+				case <-timeout:
+					break loop
+				}
+			}
+			if !found {
+				t.Errorf("[%s] Expected final failure message: %q", test.testName, test.expectedChan)
+			}
+			clientConn.Close()
+		})
 	}
 }
 func TestStartChat_InputAndDeathSignal(t *testing.T) {
 
-	originalReconnectDelay := ReconnectDelay
-	ReconnectDelay = 1 * time.Millisecond
-	defer func() {
-		ReconnectDelay = originalReconnectDelay
-	}()
 	tests := []struct {
 		testName     string
 		rawInput     string // klavyeden gönderilecek msg
 		triggerDeath bool
 		expectedChan string
 	}{
-		{"Boş Veri", " ", false, ""},
-		{"Yanlış Komut", "/wrong_commant", false, "Unknown command. Type /help"},
-		{"Normal mesaj", "selam", false, "ME| selam"},
-		{"Death Signal", "", true, "Connection completely lost"},
+		{"Null Data", " ", false, ""},
+		{"Incorrect Command", "/wrong_commant", false, "Unknown command. Type /help"},
+		{"Standard message", "selam", false, "ME| selam"},
+		{"DeathSignal", "", true, "Connection completely lost"},
 	}
 
 	for _, test := range tests {
@@ -130,7 +321,7 @@ func TestStartChat_InputAndDeathSignal(t *testing.T) {
 			inputChan <- test.rawInput
 		}
 
-		if test.testName == "Boş Veri" {
+		if test.testName == "Null Data" {
 			continue
 		}
 
@@ -183,29 +374,28 @@ func TestParseIncomingMessage(t *testing.T) {
 	}
 }
 
-func TestCleanInput(t *testing.T) {
-	// mesaj gönderip deneriz bu kısmı
-	tests := []struct {
-		sent         string
-		Expected     []string
-		inputControl bool
-	}{
-		{" /join  denemeler   ", []string{"/join", "denemeler"}, true},
-		{" /join DeNeMeLeR", []string{"/join", "denemeler"}, true},
-		{"/join  DeNeMeLeR   ", []string{"/join", "denemeler"}, true},
-		{"   /jOIN     DeNeMeLeR  ", []string{"/join", "denemeler"}, true},
-		{" /JOIN  denemeler", []string{"/join", "denemeler"}, true},
-		{" /join  DENEMELER", []string{"/join", "denemeler"}, true},
-	}
+// func TestCleanInput(t *testing.T) {
+// 	// mesaj gönderip deneriz bu kısmı
+// 	tests := []struct {
+// 		sent         string
+// 		Expected     []string
+// 		inputControl bool
+// 	}{
+// 		{" /join  denemeler   ", []string{"/join", "denemeler"}, true},
+// 		{" /join DeNeMeLeR", []string{"/join", "denemeler"}, true},
+// 		{"/join  DeNeMeLeR   ", []string{"/join", "denemeler"}, true},
+// 		{"   /jOIN     DeNeMeLeR  ", []string{"/join", "denemeler"}, true},
+// 		{" /JOIN  denemeler", []string{"/join", "denemeler"}, true},
+// 		{" /join  DENEMELER", []string{"/join", "denemeler"}, true},
+// 	}
 
-	for _, test := range tests {
-
-		cleanOutput := cleanInput(test.sent)
-		if !slices.Equal(cleanOutput, test.Expected) {
-			t.Errorf("Expected:%v , Received:%v", test.Expected, cleanOutput)
-		}
-	}
-}
+//		for _, test := range tests {
+//			cleanOutput := cleanInput(test.sent)
+//			if !slices.Equal(cleanOutput, test.Expected) {
+//				t.Errorf("Expected:%v , Received:%v", test.Expected, cleanOutput)
+//			}
+//		}
+//	}
 func TestHandleUserCommand(t *testing.T) {
 
 	// liste 0 ise

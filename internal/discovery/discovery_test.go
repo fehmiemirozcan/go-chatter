@@ -6,43 +6,73 @@ import (
 	"time"
 )
 
-func TestDiscover_LeaderIp(t *testing.T) {
+func TestStartUDPListener_Error(t *testing.T) {
+	testPort := "7777"
 
-	// Ağda çalışan bir dinleyici var
-	go StartUDPListener("6666")
-
-	time.Sleep(time.Millisecond * 350)
-
-	answer, discoErr := DiscoverLeaderIP("6666")
-	if discoErr != nil {
-		t.Error("Unexpected error")
+	addr, _ := net.ResolveUDPAddr("udp", ":"+testPort)
+	dummyConn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		t.Fatalf("Test setup failed: could not occupy port: %v", err)
 	}
-	if answer == "" {
-		t.Error("The function returned an empty IP.")
+
+	defer dummyConn.Close()
+
+	// Fonksiyonunu aynı port ile çağırdım port zaten dummyConn tarafından dolu olduğu için, içerideki ListenUDP
+	// "address already in use" hatası verecek ve direkt return edecektir.
+	StartUDPListener(testPort)
+}
+func TestDiscover_ResolUDPAddrEror(t *testing.T) {
+	testPort := "-1"
+
+	answer, discoErr := DiscoverLeaderIP(testPort)
+	if discoErr == nil {
+		t.Fatalf("Expected a resolution error due to invalid port, but got no error")
+	}
+
+	if answer != "" {
+		t.Errorf("Expected empty string on error, but received: %s", answer)
+	}
+}
+func TestDiscover_LeaderIp(t *testing.T) {
+	testPort := "6666"
+	// Ağda çalışan bir dinleyici var
+	go StartUDPListener(testPort)
+
+	time.Sleep(time.Millisecond * 100)
+
+	answer, discoErr := DiscoverLeaderIP(testPort)
+	if discoErr != nil {
+		t.Fatalf("Unexpected error: %v", discoErr)
+	}
+	if answer == "" || answer == "Timeout" {
+		t.Errorf("The function returned an empty IP or Timeout. Received: %s", answer)
 	}
 }
 
 func TestDiscover_NoOneOnline(t *testing.T) {
-
+	testPort := "8889"
 	// Ağda çalışan bir dinleyici yok
-	answer, discoErr := DiscoverLeaderIP("8889")
+	answer, discoErr := DiscoverLeaderIP(testPort)
 
 	if discoErr == nil {
-		t.Error("There is no one on the network; the function should throw an error.")
+		t.Fatal("There is no one on the network; the function should throw an error.")
 	}
 
-	timeout := "Timeout"
-	if answer != timeout {
-		t.Errorf("Expected:%s, Received:%s", timeout, answer)
+	expectedAnswer := "Timeout"
+	if answer != expectedAnswer {
+		t.Errorf("Expected: %s, Received: %s", expectedAnswer, answer)
 	}
 }
 
 func TestDiscover_WrongAsnwer(t *testing.T) {
-
-	//Ağda yanlış veri gönderilme durumu
 	testPort := "9983"
+	//Ağda yanlış veri gönderilme durumu
+
 	go func() {
-		addr, _ := net.ResolveUDPAddr("udp", ":"+testPort)
+		addr, resolErr := net.ResolveUDPAddr("udp", ":"+testPort)
+		if resolErr != nil {
+			return
+		}
 		conn, listenErr := net.ListenUDP("udp", addr)
 		if listenErr != nil {
 			return
@@ -61,11 +91,10 @@ func TestDiscover_WrongAsnwer(t *testing.T) {
 
 	_, discoErr := DiscoverLeaderIP(testPort)
 	if discoErr == nil {
-		t.Error("No error occurred.")
+		t.Fatal("An error was expected because of the wrong answer, but no error occurred.")
 	}
-	unknownAnswer := "unknown_answer"
-	if discoErr.Error() != unknownAnswer {
-		t.Errorf("Expeceted:%s, Received:%v", unknownAnswer, discoErr.Error())
+	expectedErrMessage := "unknown_answer"
+	if discoErr.Error() != expectedErrMessage {
+		t.Errorf("Expected Error: %s, Received Error: %v", expectedErrMessage, discoErr.Error())
 	}
-
 }

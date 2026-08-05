@@ -22,22 +22,23 @@ func TestCommandNewroom(t *testing.T) {
 	}{
 		{"liste 1'den Küçük", []string{}, "Please specify a room name. Example: /join <room_name> <password>", "", true, false, false},
 		{"liste 2'den büyük", []string{"denemeOdası", "123", "merhaba"}, "Error: Too many arguments. Example: /join <room_name> [password]", "", true, false, false},
+		{"Bağlantı yok", []string{"denemeOdası", "123"}, "Error: You are not connected to any server to action!", "", true, false, false},
 		{"Bağlantı Var Ama Kopuyor", []string{"denemeOdası", "123"}, "Error: Could not send command to server.", "", true, true, true},
 		{"Herşey Başarılı", []string{"denemeOdası", "123"}, "", "CMD|join|denemeOdası|123\n", false, true, false},
 	}
 
 	for _, test := range tests {
+		chanJoin := make(chan string, 1)
 		if test.requiresConn == true {
 
-			chanJoin := make(chan string, 1)
 			clientConn, serverConn := net.Pipe()
-
-			hand := &Handler{ServerConn: serverConn,
+			hand := &Handler{
+				ServerConn:    serverConn,
 				RoomPasswords: make(map[string]string)}
 
 			if test.closeConnection == true {
-
 				serverConn.Close()
+
 			} else {
 				go func() {
 					buf := make([]byte, 1024)
@@ -61,23 +62,25 @@ func TestCommandNewroom(t *testing.T) {
 			if test.expected != "" {
 				take := <-chanJoin
 				if test.expected != take {
-					t.Errorf("Expected:%q , Received:%q", test.expected, take)
+					t.Errorf("[%s] Output Error ->> Expected:%q , Received:%q", test.testName, test.expected, take)
 				}
 			}
 
 		} else {
-			chanJoin := make(chan string, 1)
+
 			hand := &Handler{RoomPasswords: make(map[string]string)}
 
 			joinErr := hand.CommandJoinRoom(chanJoin, test.sent...)
 			hasError := joinErr != nil
 			if hasError != test.expectedError {
-				t.Fatalf("%s Expected:%t , Received:%t", test.testName, test.expectedError, hasError)
+				t.Fatalf("[%s] Expected:%t , Received:%t", test.testName, test.expectedError, hasError)
 			}
 
-			take := <-chanJoin
-			if test.expected != take {
-				t.Errorf("Expected:%q , Received:%q", test.expected, take)
+			if test.expected != "" {
+				take := <-chanJoin
+				if test.expected != take {
+					t.Errorf("Expected:%q , Received:%q", test.expected, take)
+				}
 			}
 		}
 	}

@@ -13,13 +13,12 @@ import (
 )
 
 var (
-	ReconnectDelay     = 50 * time.Second
 	DiscoverLeaderFunc = discovery.DiscoverLeaderIP
 	StartUDPFunc       = discovery.StartUDPListener
 	DialFunc           = net.Dial
-	StartServerFunc    = func() {
+	StartServerFunc    = func() error {
 		hub := server.NewRouterHub()
-		go hub.StartServer(":9000")
+		return hub.StartServer(":9000")
 	}
 )
 
@@ -45,74 +44,100 @@ func StartChat(userName string, globalConn net.Conn, inputChan chan string, outp
 
 	var listenToServer func(roomName string, c net.Conn)
 	listenToServer = func(roomName string, c net.Conn) {
-		readBuf := make([]byte, 1024)
+		readBuf := make([]byte, 65536) // 1024*64 = 65.536 (64 kb)
 		for {
-			n, readErr := c.Read(readBuf) // Sunucudan mesaj var mı ?
+			n, readErr := c.Read(readBuf) // Sunucuyu dinliyoruz göç süreci için lider çıkarsa
 			if readErr != nil {
-				time.Sleep(ReconnectDelay)
+				// Eğer oda geçişi yaptıysa direk çık
 				if cmdHandler.CurrentRoom != roomName {
 					return
-				} else {
-					msg := fmt.Sprintf("\n[!] Leader connection lost! Initial host migration: %s\n", roomName)
-					outputChan <- msg
-					// oda benim isteğim dışında bağlantısını kopardu hala aynı odadayım
-
-					// Ağda yeni bir lider var mı?
-					newLeaderIP, leaderErr := DiscoverLeaderFunc("8081")
-
-					// Lider Yoksa
-					if leaderErr != nil {
-						outputChan <- "[!] You are the leader! Starting server..."
-
-						// UDP dinleyicisini ve ana sunucumuzu ayağa kaldırıyoruz
-						go StartUDPFunc("8081")
-						go StartServerFunc()
-
-						time.Sleep(100 * time.Millisecond)
-
-						// TCP ile bağlanıyoruz
-						newConn, _ := DialFunc("tcp", "localhost:9000")
-
-						msgs := fmt.Sprintf("createroom|%s||%s", roomName, cmdHandler.UserName)
-						newConn.Write([]byte(msgs))
-
-						buf := make([]byte, 1024)
-						n, _ := newConn.Read(buf)
-
-						if string(buf[:n]) == "Successful" {
-							cmdHandler.ServerConn = newConn
-							go listenToServer(roomName, newConn)
-						}
-
-					} else {
-						// Lider Varsa
-						msg := fmt.Sprintf("[!] New leader found at %s. Connecting...", newLeaderIP)
-						outputChan <- msg
-
-						localhost := fmt.Sprintf("%s:9000", newLeaderIP)
-						newConn, _ := DialFunc("tcp", localhost)
-
-						msgs := fmt.Sprintf("join|%s||%s", roomName, cmdHandler.UserName)
-						newConn.Write([]byte(msgs))
-
-						// Onay alırsak yeni bağlantıyı kaydet ve dinlemeye başla
-						buf := make([]byte, 1024)
-						n, _ := newConn.Read(buf)
-						if string(buf[:n]) == "Successful" {
-							cmdHandler.ServerConn = newConn
-							go listenToServer(roomName, newConn)
-						} else {
-							outputChan <- "[!] Migration failed: Connection rejected by new leader."
-						}
-					}
 				}
 
-				return // oda değiştirdim sessizce diğer odadan ayrıl
+				outputChan <- fmt.Sprintf("\n[!] Leader connection lost! Fast host migration: %s\n", roomName)
+				newLeaderIP, leaderErr := DiscoverLeaderFunc("8081") // ağda lider var mı ?
+
+				// Lider yoksa
+				if leaderErr != nil || newLeaderIP == "" || newLeaderIP == "Timeout" {
+					startErr := StartServerFunc()
+					// Başkası lider olduysa
+					if startErr != nil {
+
+						outputChan <- "[!] Another client claimed the throne first! Connecting...\n"
+
+						for i := 0; i < 5; i++ {
+							// liderin portuna bağlanmak
+							newConn, dialErr := DialFunc("tcp", "localhost:9000")
+							if dialErr == nil {
+								msgs := fmt.Sprintf("join|%s||%s", roomName, cmdHandler.UserName)
+								newConn.Write([]byte(msgs))
+								buf := make([]byte, 1024)
+								n, _ := newConn.Read(buf)
+
+								if string(buf[:n]) == "Successful" {
+									cmdHandler.ServerConn = newConn
+									go listenToServer(roomName, newConn)
+									return
+								}
+								newConn.Close()
+							}
+							// Sunucuyu DDOSlamamak için ufak bir bekleme!
+							time.Sleep(100 * time.Millisecond)
+						}
+						outputChan <- "[!] Migration failed: Connection rejected by new leader.\n"
+
+					} else {
+						// sunucu ayağa kalktı ve lider bizsek
+						outputChan <- "[!] You are the leader! Starting server...\n"
+						go StartUDPFunc("8081")
+
+						for i := 0; i < 5; i++ {
+							newConn, dialErr := DialFunc("tcp", "localhost:9000")
+							if dialErr == nil {
+								msgs := fmt.Sprintf("createroom|%s||%s", roomName, cmdHandler.UserName)
+								newConn.Write([]byte(msgs))
+								buf := make([]byte, 1024)
+								n, _ := newConn.Read(buf)
+
+								if string(buf[:n]) == "Successful" {
+									cmdHandler.ServerConn = newConn
+									go listenToServer(roomName, newConn)
+									return
+								}
+								newConn.Close()
+							}
+							time.Sleep(50 * time.Millisecond)
+						}
+					}
+				} else {
+					// Ağda zaten lider var
+					msg := fmt.Sprintf("[!] New leader found at %s. Connecting...\n", newLeaderIP)
+					outputChan <- msg
+
+					leaderAddress := fmt.Sprintf("%s:9000", newLeaderIP)
+					for i := 0; i < 5; i++ {
+						newConn, dialErr := DialFunc("tcp", leaderAddress)
+						if dialErr == nil {
+							msgs := fmt.Sprintf("join|%s||%s", roomName, cmdHandler.UserName)
+							newConn.Write([]byte(msgs))
+							buf := make([]byte, 1024)
+							n, _ := newConn.Read(buf)
+
+							if string(buf[:n]) == "Successful" {
+								cmdHandler.ServerConn = newConn
+								go listenToServer(roomName, newConn)
+								return
+							}
+							newConn.Close()
+						}
+						time.Sleep(100 * time.Millisecond)
+					}
+					outputChan <- "[!] Migration failed: Could not connect to remote leader.\n"
+				}
+				return
 			}
 
 			rawMsg := string(readBuf[:n])
 
-			// TCP'nin birleştirdiği paketleri \n'den ayırıyoruz
 			message := strings.Split(rawMsg, "\n")
 
 			for _, msg := range message {
@@ -157,11 +182,10 @@ func StartChat(userName string, globalConn net.Conn, inputChan chan string, outp
 
 // CleanInput fonksiyonu.
 func cleanInput(dirtWords string) []string {
-	output := strings.ToLower(dirtWords)
-
-	// dirtWords := "   /join      GizliOda   "
-	// ["/join", "gizlioda"]
-	words := strings.Fields(output)
+	words := strings.Fields(dirtWords)
+	if len(words) > 0 {
+		words[0] = strings.ToLower(words[0])
+	}
 
 	return words
 }

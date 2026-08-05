@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"strings"
@@ -23,44 +24,60 @@ type Client struct {
 type Room struct {
 	Users    map[Messenger]*Client
 	Password string
+	Owner    string
 	Mutex    sync.Mutex
 }
 
 type RouterHub struct {
-	Rooms map[string]*Room // Oda ismi ve adresi.
-	Mutex sync.Mutex
+	Rooms         map[string]*Room // Oda ismi ve adresi.
+	IPConnections map[string]int   // Aynı Ip da kaç kişi bağlı
+	Mutex         sync.Mutex
 }
 
 // Sunucu açıldığında boş bir merkez olacak.
 func NewRouterHub() *RouterHub {
 	return &RouterHub{
-		Rooms: make(map[string]*Room),
+		Rooms:         make(map[string]*Room),
+		IPConnections: make(map[string]int),
 	}
 }
 
-func (h *RouterHub) StartServer(port string) {
+func (h *RouterHub) StartServer(port string) error {
 	list, ListErr := net.Listen("tcp", port)
 	if ListErr != nil {
 		//fmt.Println("Master Server could not start:")
 		// Ana sunucu başlatılamadı.
-		return
+		return ListErr
 	}
-	defer list.Close()
 
 	//fmt.Println("--> Master Server listening on port", port)
 	// Ana sunucu belirtilen portta dinleme yapıyor.
-
-	for {
-		conn, acceptErr := list.Accept()
-		if acceptErr != nil {
-			continue
+	go func() {
+		defer list.Close()
+		for {
+			conn, acceptErr := list.Accept()
+			if acceptErr != nil {
+				continue
+			}
+			go h.handleConnection(conn)
 		}
-		go h.handleConnection(conn)
-	}
+	}()
+	return nil
 }
 
 // Kimlik ve oda kontrolleri.
 func (h *RouterHub) handleConnection(conn net.Conn) {
+
+	ip := strings.Split(conn.RemoteAddr().String(), ":")[0]
+	h.Mutex.Lock()
+	if h.IPConnections[ip] >= 3 {
+		h.Mutex.Unlock()
+		conn.Write([]byte("SYSTEM|Connection limit reached for this IP!\n"))
+		conn.Close()
+		return
+	}
+	h.IPConnections[ip]++
+	h.Mutex.Unlock()
 
 	buf := make([]byte, 1024)
 	c, readErr := conn.Read(buf)
@@ -124,6 +141,9 @@ func (h *RouterHub) handleConnection(conn net.Conn) {
 		h.Mutex.Unlock()
 		conn.Write([]byte("Room not found!"))
 		// Oda bulunamadı.
+		h.Mutex.Lock()
+		h.IPConnections[ip]--
+		h.Mutex.Unlock()
 		conn.Close()
 		return
 	}
@@ -137,9 +157,14 @@ func (h *RouterHub) handleConnection(conn net.Conn) {
 	}
 
 	if !exists {
+		ownerName := userName
+		if roomName == "global" {
+			ownerName = "SYSTEM" // Global odayı sistemin üzerine yapıyoruz
+		}
 		room = &Room{
 			Users:    make(map[Messenger]*Client),
 			Password: password,
+			Owner:    ownerName,
 		}
 		h.Rooms[roomName] = room
 
@@ -181,6 +206,9 @@ func (h *RouterHub) handleConnection(conn net.Conn) {
 	// Ağa yeni bir oda eklendiyse (veya biri girdiyse) güncel oda listesini herkese yolla
 	h.broadcastAllRoomsList()
 
+	joinMsg := fmt.Sprintf("%s [+] joined the room.\n", userName)
+	h.broadcastToRoom(room, conn, joinMsg)
+
 	// chati dinlemeye devam et
 	h.listenClientMessages(conn, room, userName)
 }
@@ -198,27 +226,27 @@ func (h *RouterHub) listenClientMessages(conn net.Conn, room *Room, userName str
 		leaveMsg := fmt.Sprintf("%s [!] left the room.\n", userName)
 		h.broadcastToRoom(room, conn, leaveMsg)
 
+		clientIP := strings.Split(conn.RemoteAddr().String(), ":")[0]
+		h.Mutex.Lock()
+		h.IPConnections[clientIP]-- // Çıkan kişinin hakkını geri ver
+		h.Mutex.Unlock()
 		conn.Close()
 	}()
 
-	lastMsgTime := time.Now()
-	buf := make([]byte, 1024)
-	for {
-		n, readErr := conn.Read(buf)
-		if readErr != nil {
-			return // kullanıcıyı bağlantıyı koparttı, defer aktif olacak
+	lastMsgTime := time.Now().Add(-1 * time.Second)
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		rawMsg := scanner.Text()
+		cleanMsg := strings.TrimSpace(rawMsg)
+		if cleanMsg == "" {
+			continue
 		}
-
 		now := time.Since(lastMsgTime)
-
 		if now < 300*time.Millisecond {
-			conn.Write([]byte("You're sending messages too quickly!"))
+			conn.Write([]byte("SYSTEM| You're sending messages too quickly!\n"))
 			continue
 		}
 		lastMsgTime = time.Now()
-
-		rawMsg := string(buf[:n])
-		cleanMsg := strings.TrimSpace(rawMsg)
 
 		// Durum değiştirme
 		if strings.HasPrefix(cleanMsg, "STATUS|") {
@@ -263,6 +291,22 @@ func (h *RouterHub) listenClientMessages(conn net.Conn, room *Room, userName str
 					continue
 				}
 
+				if action == "createroom" && !exists {
+					userRoomCount := 0
+					for _, r := range h.Rooms {
+						if r.Owner == userName { // Bu kullanıcıya ait kaç oda var
+							userRoomCount++
+						}
+					}
+
+					// Bir kullanıcı en fazla 3 oda kurabilir (ilk giriş yapan sadece 2 oda kurabilir globa oda onun sayılır.)
+					if userRoomCount >= 3 {
+						h.Mutex.Unlock()
+						conn.Write([]byte("ROOMCHANGE|ERR|You can only create up to 3 rooms!\n"))
+						continue
+					}
+				}
+
 				// Eski odadan kullanıcının bağlantısını siliyoruz
 				room.Mutex.Lock()
 				movingClient := room.Users[conn]
@@ -276,9 +320,11 @@ func (h *RouterHub) listenClientMessages(conn net.Conn, room *Room, userName str
 
 				// Eğer oda createroom ile yeni oluşturuluyorsa bellekte yer açıyoruz
 				if !exists {
+
 					targetRoom = &Room{
 						Users:    make(map[Messenger]*Client),
 						Password: targetPassword,
+						Owner:    userName,
 					}
 					h.Rooms[targetRoomName] = targetRoom
 				}
@@ -303,12 +349,13 @@ func (h *RouterHub) listenClientMessages(conn net.Conn, room *Room, userName str
 				targetRoom.Users[conn] = movingClient
 				targetRoom.Mutex.Unlock()
 
-				// Fonksiyon parametresi olan 'room' değişkenini güncelliyoruz.
+				// Fonksiyon parametresi olan room değişkenini güncelliyoruz.
 				// Böylece hem döngüdeki normal mesajlar yeni odaya gider hem de
-				// kullanıcı çıkış yaparsa 'defer' fonksiyonu doğru odayı temizler.
+				// kullanıcı çıkış yaparsa defer fonksiyonu doğru odayı temizler.
 				room = targetRoom
 
-				// İstemciye odanın başarıyla değiştiğini bildiriyoruz
+				// İstemciye odanın başarıyla değiştiğini bildir
+				// iyoruz
 				conn.Write([]byte(fmt.Sprintf("ROOMCHANGE|SUCCESS|%s\n", targetRoomName)))
 
 				time.Sleep(100 * time.Millisecond)
@@ -316,6 +363,9 @@ func (h *RouterHub) listenClientMessages(conn net.Conn, room *Room, userName str
 				// Yeni odadaki herkesin ekranını ve global oda listelerini tazeliyoruz
 				h.broadcastRoomUsers(room)
 				h.broadcastAllRoomsList()
+
+				joinMsg := fmt.Sprintf("%s [+] joined the room.\n", userName)
+				h.broadcastToRoom(room, conn, joinMsg)
 			}
 			continue
 		}

@@ -30,6 +30,7 @@ func EncryptMessage(plainText string, password string) string {
 	block, _ := aes.NewCipher(key)
 
 	// GCM aktif ediyoruz. Veriyi etiketler değişmesi durumunda anlamak
+	// 128 bit boyuta sahip
 	gcm, _ := cipher.NewGCM(block)
 
 	// Benzersiz bir nonce üret

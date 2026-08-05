@@ -21,6 +21,7 @@ var (
 )
 
 func main() {
+	//0u8tftyuıfytufg7oıyu
 	fmt.Println("")
 	fmt.Print(">>> Welcome Go Chatter <<<\n")
 
@@ -35,7 +36,7 @@ func main() {
 		// Lider bulunamadı. Lider SİZSİNİZ!
 		startAsLeader(userName)
 	} else {
-		fmt.Printf("Leader found! IP Address: %s", leaderIP)
+		fmt.Printf("Leader found! IP Address: %s\n", leaderIP)
 		// Lider bulundu! IP Adresi:
 		startAsFollower(userName, leaderIP)
 	}
@@ -62,16 +63,25 @@ func startAsLeader(userName string) {
 
 	// Sunucuyu ayağa kaldırıyoruz.
 	hub := server.NewRouterHub()
-	go hub.StartServer(":9000")
+
+	// Artık 'go' kelimesini sildik, çünkü server.go içinde zaten go func() yaptık.
+	// Portun kilitli olup olmadığını asıl şimdi kontrol edebileceğiz!
+	startErr := hub.StartServer(":9000")
+	if startErr != nil {
+		fmt.Printf("[!] Fatal Error: Could not start the server on port 9000. HATA: %v\n", startErr)
+		return
+	}
 
 	time.Sleep(100 * time.Millisecond)
 
 	// Kurduğumuz sunucuya bağlanıyoruz.
 	conn, dialErr := net.Dial("tcp", "localhost:9000")
 	if dialErr != nil {
-		fmt.Println("Failed to start Master Server!")
+		// Gerçek hatayı ekrana basıyoruz ki körü körüne tahmin etmeyelim!
+		fmt.Printf("Failed to connect to Master Server! DIAL HATA: %v\n", dialErr)
 		return
 	}
+
 	// Global odaya Handshake
 	conn.Write([]byte(fmt.Sprintf("createroom|global||%s", userName)))
 
